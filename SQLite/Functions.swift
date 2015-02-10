@@ -33,41 +33,43 @@ public extension Database {
     ///                  mapped to the function's parameters and should return a
     ///                  raw SQL value (or nil).
     public func create(#function: String, _ block: [Binding?] -> Binding?) {
-        try(SQLiteCreateFunction(handle, function) { context, argc, argv in
-            let arguments: [Binding?] = map(0..<argc) { idx in
-                let value = argv[Int(idx)]
-                switch sqlite3_value_type(value) {
-                case SQLITE_BLOB:
-                    let bytes = sqlite3_value_blob(value)
-                    let length = sqlite3_value_bytes(value)
-                    return Blob(bytes: bytes, length: Int(length))
-                case SQLITE_FLOAT:
-                    return Double(sqlite3_value_double(value))
-                case SQLITE_INTEGER:
-                    return Int(sqlite3_value_int64(value))
-                case SQLITE_NULL:
-                    return nil
-                case SQLITE_TEXT:
-                    return String.fromCString(UnsafePointer(sqlite3_value_text(value)))!
-                case let type:
-                    assertionFailure("unsupported value type: \(type)")
+        try {
+            SQLiteCreateFunction(self.handle, function) { context, argc, argv in
+                let arguments: [Binding?] = map(0..<argc) { idx in
+                    let value = argv[Int(idx)]
+                    switch sqlite3_value_type(value) {
+                    case SQLITE_BLOB:
+                        let bytes = sqlite3_value_blob(value)
+                        let length = sqlite3_value_bytes(value)
+                        return Blob(bytes: bytes, length: Int(length))
+                    case SQLITE_FLOAT:
+                        return Double(sqlite3_value_double(value))
+                    case SQLITE_INTEGER:
+                        return Int(sqlite3_value_int64(value))
+                    case SQLITE_NULL:
+                        return nil
+                    case SQLITE_TEXT:
+                        return String.fromCString(UnsafePointer(sqlite3_value_text(value)))!
+                    case let type:
+                        assertionFailure("unsupported value type: \(type)")
+                    }
+                }
+                let result = block(arguments)
+                if let result = result as? Blob {
+                    sqlite3_result_blob(context, result.bytes, Int32(result.length), nil)
+                } else if let result = result as? Double {
+                    sqlite3_result_double(context, result)
+                } else if let result = result as? Int {
+                    sqlite3_result_int64(context, Int64(result))
+                } else if let result = result as? String {
+                    sqlite3_result_text(context, result, Int32(count(result)), SQLITE_TRANSIENT)
+                } else if result == nil {
+                    sqlite3_result_null(context)
+                } else {
+                    assertionFailure("unsupported result type: \(result)")
                 }
             }
-            let result = block(arguments)
-            if let result = result as? Blob {
-                sqlite3_result_blob(context, result.bytes, Int32(result.length), nil)
-            } else if let result = result as? Double {
-                sqlite3_result_double(context, result)
-            } else if let result = result as? Int {
-                sqlite3_result_int64(context, Int64(result))
-            } else if let result = result as? String {
-                sqlite3_result_text(context, result, Int32(countElements(result)), SQLITE_TRANSIENT)
-            } else if result == nil {
-                sqlite3_result_null(context)
-            } else {
-                assertionFailure("unsupported result type: \(result)")
-            }
-        })
+        }
     }
 
     // MARK: - Type-Safe Function Creation Shims
@@ -220,5 +222,5 @@ public extension Database {
 }
 
 private func asValue<A: Value>(value: Binding?) -> A {
-    return A.fromDatatypeValue(value as A.Datatype) as A
+    return A.fromDatatypeValue(value as! A.Datatype) as! A
 }

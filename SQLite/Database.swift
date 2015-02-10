@@ -27,7 +27,7 @@ import Foundation
 /// A connection (handle) to a SQLite database.
 public final class Database {
 
-    internal let handle: COpaquePointer = nil
+    internal var handle = COpaquePointer.null()
 
     /// Whether or not the database was opened in a read-only state.
     public var readonly: Bool { return sqlite3_db_readonly(handle, nil) == 1 }
@@ -46,10 +46,10 @@ public final class Database {
     /// :returns: A new database connection.
     public init(_ path: String? = ":memory:", readonly: Bool = false) {
         let flags = readonly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE
-        try(sqlite3_open_v2(path ?? "", &handle, flags | SQLITE_OPEN_FULLMUTEX, nil))
+        try { sqlite3_open_v2(path ?? "", &self.handle, flags | SQLITE_OPEN_FULLMUTEX, nil) }
     }
 
-    deinit { try(sqlite3_close(handle)) } // sqlite3_close_v2 in Yosemite/iOS 8?
+    deinit { try { sqlite3_close(self.handle) } } // sqlite3_close_v2 in Yosemite/iOS 8?
 
     // MARK: -
 
@@ -75,7 +75,7 @@ public final class Database {
     ///
     /// :param: SQL A batch of zero or more semicolon-separated SQL statements.
     public func execute(SQL: String) {
-        try(sqlite3_exec(handle, SQL, nil, nil, nil))
+        try { sqlite3_exec(self.handle, SQL, nil, nil, nil) }
     }
 
     // MARK: - Prepare
@@ -214,129 +214,74 @@ public final class Database {
 
     }
 
-    /// Runs a series of statements in a transaction. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// transaction will automatically be committed.
-    ///
-    /// :param: statements Statements to run in the transaction.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func transaction(statements: (@autoclosure () -> Statement)...) -> Statement {
-        return transaction(statements)
-    }
-    
-    /// Runs a series of statements in a transaction. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// transaction will automatically be committed.
-    ///
-    /// :param: statements Statements to run in the transaction.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func transaction(statements: [@autoclosure () -> Statement]) -> Statement {
-        return transaction(.Deferred, statements)
-    }
-
-    /// Runs a series of statements in a transaction. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// transaction will automatically be committed.
-    ///
-    /// :param: mode       The mode in which the transaction will acquire a
-    ///                    lock.
-    ///
-    /// :param: statements Statements to run in the transaction.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func transaction(mode: TransactionMode, _ statements: (@autoclosure () -> Statement)...) -> Statement {
-        return transaction(mode, statements)
-    }
-
-    /// Runs a series of statements in a transaction. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// transaction will automatically be committed.
-    ///
-    /// :param: mode       The mode in which the transaction will acquire a
-    ///                    lock.
-    ///
-    /// :param: statements Statements to run in the transaction.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func transaction(mode: TransactionMode, _ statements: [@autoclosure () -> Statement]) -> Statement {
-        var statement: Statement!
-        let result = transaction(mode) { transaction in
-            statement = reduce(statements, transaction, &&)
-            return statement.failed ? .Rollback : .Commit
-        }
-        return statement && result
+    public func transaction(_ mode: TransactionMode = .Deferred) -> Statement {
+        return run("BEGIN \(mode.rawValue) TRANSACTION")
     }
 
     public func transaction(_ mode: TransactionMode = .Deferred, block: Statement -> TransactionResult) -> Statement {
-        return run(block(run("BEGIN \(mode.rawValue) TRANSACTION")).rawValue)
+        return run(block(transaction(mode)).rawValue)
+    }
+
+    public func commit() -> Statement {
+        return run(TransactionResult.Commit.rawValue)
+    }
+
+    public func rollback() -> Statement {
+        return run(TransactionResult.Rollback.rawValue)
     }
 
     // MARK: - Savepoints
-
-    private var saveName = 0
-
-    /// Runs a series of statements in a new savepoint. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// savepoint will automatically be committed.
-    ///
-    /// :param: statements Statements to run in the savepoint.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func savepoint(statements: (@autoclosure () -> Statement)...) -> Statement {
-        return savepoint(statements)
-    }
-
-    /// Runs a series of statements in a new savepoint. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// savepoint will automatically be committed.
-    ///
-    /// :param: statements Statements to run in the savepoint.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func savepoint(statements: [@autoclosure () -> Statement]) -> Statement {
-        let transaction = savepoint("\(++saveName)", statements)
-        --saveName
-        return transaction
-    }
-
-    /// Runs a series of statements in a new savepoint. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// savepoint will automatically be committed.
-    ///
-    /// :param: name       The name of the savepoint.
-    ///
-    /// :param: statements Statements to run in the savepoint.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func savepoint(name: String, _ statements: (@autoclosure () -> Statement)...) -> Statement {
-        return savepoint(name, statements)
-    }
-
-    /// Runs a series of statements in a new savepoint. The first statement to
-    /// fail will short-circuit the rest and roll back the changes. A successful
-    /// savepoint will automatically be committed.
-    ///
-    /// :param: name       The name of the savepoint.
-    ///
-    /// :param: statements Statements to run in the savepoint.
-    ///
-    /// :returns: The last statement executed, successful or not.
-    public func savepoint(name: String, _ statements: [@autoclosure () -> Statement]) -> Statement {
-        let quotedName = quote(literal: name)
-        var savepoint = run("SAVEPOINT \(quotedName)")
-        // FIXME: rdar://15217242 // for statement in statements { savepoint = savepoint && statement() }
-        for idx in 0..<statements.count { savepoint = savepoint && statements[idx]() }
-        savepoint = savepoint && run("RELEASE SAVEPOINT \(quotedName)")
-        if savepoint.failed { run("ROLLBACK TO SAVEPOINT \(quotedName)") }
-        return savepoint
-    }
+//
+//    private var saveName = 0
+//
+//    public enum SavepointResult {
+//
+//        case Release
+//
+//        case Rollback
+//        
+//    }
+//
+//    /// Runs a series of statements in a new savepoint. The first statement to
+//    /// fail will short-circuit the rest and roll back the changes. A successful
+//    /// savepoint will automatically be committed.
+//    ///
+//    /// :param: statements Statements to run in the savepoint.
+//    ///
+//    /// :returns: The last statement executed, successful or not.
+//    public func savepoint(statements: [@autoclosure () -> Statement]) -> Statement {
+//        let transaction = savepoint("\(++saveName)", statements)
+//        --saveName
+//        return transaction
+//    }
+//
+//    /// Runs a series of statements in a new savepoint. The first statement to
+//    /// fail will short-circuit the rest and roll back the changes. A successful
+//    /// savepoint will automatically be committed.
+//    ///
+//    /// :param: name       The name of the savepoint.
+//    ///
+//    /// :param: statements Statements to run in the savepoint.
+//    ///
+//    /// :returns: The last statement executed, successful or not.
+//    public func savepoint(name: String, _ statements: [@autoclosure () -> Statement]) -> Statement {
+//        let quotedName = quote(literal: name)
+//        var savepoint = run("SAVEPOINT \(quotedName)")
+//        // FIXME: rdar://15217242 // for statement in statements { savepoint = savepoint && statement() }
+//        for idx in 0..<statements.count { savepoint = savepoint && statements[idx]() }
+//        savepoint = savepoint && run("RELEASE SAVEPOINT \(quotedName)")
+//        if savepoint.failed { run("ROLLBACK TO SAVEPOINT \(quotedName)") }
+//        return savepoint
+//    }
+//
+//    public func savepoint(_ name: String? = nil, block: Statement -> TransactionResult) -> Statement {
+//        return run(block(run("BEGIN \(mode.rawValue) TRANSACTION")).rawValue)
+//    }
 
     // MARK: - Configuration
 
     public var userVersion: Int {
-        get { return scalar("PRAGMA user_version") as Int }
+        get { return scalar("PRAGMA user_version") as! Int }
         set { run("PRAGMA user_version = \(transcode(newValue))") }
     }
 
@@ -358,9 +303,9 @@ public final class Database {
     ///                  no further attempts will be made.
     public func busy(callback: (Int -> Bool)?) {
         if let callback = callback {
-            try(SQLiteBusyHandler(handle) { callback(Int($0)) ? 1 : 0 })
+            try { SQLiteBusyHandler(self.handle) { callback(Int($0)) ? 1 : 0 } }
         } else {
-            try(SQLiteBusyHandler(handle, nil))
+            try { SQLiteBusyHandler(self.handle, nil) }
         }
     }
 
@@ -385,7 +330,7 @@ public final class Database {
         return String.fromCString(sqlite3_errmsg(handle))!
     }
 
-    internal func try(block: @autoclosure () -> Int32) {
+    internal func try(block: () -> Int32) {
         perform { if block() != SQLITE_OK { assertionFailure("\(self.lastError)") } }
     }
 
